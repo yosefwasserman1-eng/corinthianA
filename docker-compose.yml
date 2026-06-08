@@ -1,0 +1,167 @@
+services:
+  # --- Reverse Proxy (שער הכניסה המאובטח) ---
+  nginx:
+    image: nginx:alpine
+    container_name: c_nginx
+    restart: always
+    ports:
+      - "443:443" # פותח את פורט HTTPS הסטנדרטי לעולם החיצון
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro # קובץ המפות והקונפיגורציה
+      - ./cert.pem:/etc/nginx/certs/cert.pem:ro             # תעודת ה-SSL מ-mkcert
+      - ./key.pem:/etc/nginx/certs/key.pem:ro               # המפתח הפרטי מ-mkcert
+    depends_on:
+      - wordpress
+      - mediawiki
+      - keycloak
+      - nodebb
+      - core
+    networks:
+      - corinthian-net
+
+  # --- בסיס נתונים מרכזי (MariaDB) ---
+  db:
+    image: mariadb:10.6
+    container_name: corinthian-db-1
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: wordpress_db
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - corinthian-net
+
+  # --- שרת זהויות וניהול משתמשים (Keycloak) ---
+  keycloak:
+    image: quay.io/keycloak/keycloak:latest
+    container_name: keycloak_corinthian
+    command: start-dev
+    environment:
+      KC_DB: mariadb
+      KC_DB_URL: jdbc:mariadb://corinthian-db-1:3306/keycloak_db
+      KC_DB_USERNAME: root
+      KC_DB_PASSWORD: root_password
+      KC_HOSTNAME: keycloak.corinthian.local
+      KC_HOSTNAME_STRICT: "false"
+      KC_PROXY_HEADERS: xforwarded 
+      KC_HTTP_ENABLED: "true"
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    depends_on:
+      - db
+    networks:
+      - corinthian-net
+    restart: unless-stopped
+
+  # --- פלטפורמת הארכיון הראשית (WordPress) ---
+  wordpress:
+    image: wordpress:latest
+    container_name: c_wordpress
+    environment:
+      WORDPRESS_DB_HOST: corinthian-db-1
+      WORDPRESS_DB_USER: root
+      WORDPRESS_DB_PASSWORD: root_password
+      WORDPRESS_DB_NAME: wordpress_db
+      WORDPRESS_DEBUG: 1
+      WORDPRESS_DEBUG_DISPLAY: 1
+      WORDPRESS_CONFIG_EXTRA: |
+        define('WP_HOME', 'https://archive.corinthian.local');
+        define('WP_SITEURL', 'https://archive.corinthian.local');
+    extra_hosts:
+      - "keycloak.corinthian.local:host-gateway"
+      - "archive.corinthian.local:host-gateway"
+      - "core.corinthian.local:host-gateway"
+    volumes:
+      - wp_data:/var/www/html
+    networks:
+      - corinthian-net
+
+  # --- האנציקלופדיה הקהילתית (MediaWiki) ---
+  mediawiki:
+    image: mediawiki:latest
+    container_name: c_mediawiki
+    depends_on:
+      - db
+    volumes:
+      - ./mediawiki/LocalSettings.php:/var/www/html/LocalSettings.php
+      - mw_images:/var/www/html/images
+      - ./mediawiki/extensions:/var/www/html/extensions 
+      - ./netfree-ca.crt:/etc/ssl/certs/netfree-ca.crt:ro
+    environment:
+      - SSL_CERT_FILE=/etc/ssl/certs/netfree-ca.crt
+    deploy:
+      resources:
+        limits:
+          memory: 400M
+    networks:
+      - corinthian-net
+    extra_hosts:
+      - "keycloak.corinthian.local:host-gateway"
+      - "archive.corinthian.local:host-gateway"
+      - "core.corinthian.local:host-gateway"
+
+  # --- ...אפליקציית הניהול והסינכרון האישית שלך (Corinthian Core) ---
+  core:
+    image: node:18-alpine
+    container_name: corinthian_core
+    working_dir: /usr/src/app
+    volumes:
+      - ./core:/usr/src/app               
+      - /usr/src/app/node_modules         
+    command: sh -c "npm install && npm install nodemon && npx nodemon -L app.js"
+    extra_hosts:
+      - "keycloak.corinthian.local:host-gateway"
+      - "archive.corinthian.local:host-gateway"
+      - "core.corinthian.local:host-gateway"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks:
+      - corinthian-net
+
+  # --- בסיס הנתונים של הפורום (Redis) ---
+  nodebb-db:
+    image: redis:7-alpine
+    container_name: c_nodebb_db
+    restart: always
+    volumes:
+      - nodebb_redis_data:/data
+    networks:
+      - corinthian-net
+
+  # --- הפורום הקהילתי בזמן אמת (NodeBB) ---
+  nodebb:
+    build:
+      context: .                   
+      dockerfile: ./nodebb/setup/Dockerfile
+    container_name: c_nodebb
+    restart: always
+    environment:
+      - URL=https://forum.corinthian.local
+      - NODE_EXTRA_CA_CERTS=/etc/ssl/certs/netfree-ca.crt
+      - REQUESTS_CA_BUNDLE=/etc/ssl/certs/netfree-ca.crt
+      - NODE_OPTIONS=--tls-cipher-list=DEFAULT@SECLEVEL=1 --unhandled-rejections=strict
+      - NODE_TLS_REJECT_UNAUTHORIZED=0
+    extra_hosts:
+      - "keycloak.corinthian.local:host-gateway"
+      - "forum.corinthian.local:host-gateway"
+    volumes:
+      - ./nodebb/assets:/usr/src/app/public/uploads
+      - ./nodebb/config/config.json:/usr/src/app/config.json
+      - ./netfree-ca.crt:/etc/ssl/certs/netfree-ca.crt:ro
+    depends_on:
+      - nodebb-db
+    networks:
+      - corinthian-net
+
+networks:
+  corinthian-net:
+    driver: bridge
+
+volumes:
+  db_data:
+  wp_data:
+  mw_images:
+  nodebb_redis_data:
