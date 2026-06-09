@@ -1,5 +1,15 @@
 services:
   # --- Reverse Proxy (שער הכניסה המאובטח) ---
+  dns-server:
+    image: jpillora/dnsmasq
+    container_name: c_dns_server
+    volumes:
+      - ./dns/dnsmasq.conf:/etc/dnsmasq.conf
+    # פתיחת פורט 53 (הפורט הרשמי של DNS) גם ב-UDP וגם ב-TCP
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+    restart: always
   nginx:
     image: nginx:alpine
     container_name: c_nginx
